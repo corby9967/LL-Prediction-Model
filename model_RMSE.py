@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-model.py — ΔSL(5) 예측 + ΔLL(=ΣΔSL) 합-방식, DLL 보조헤드, '검증 Loss' 기준 체크포인트
-- 입력: (5레벨×12) + 글로벌4 = 64차원 [기본]. --replicate_globals 로 80차원 전환 가능
-- 손실:
-    L_SL  = Huber(beta_sl) on SL_post  (레벨별 λ 가중 적용; 합=1일 필요 없음, 각 λ∈[0,1])
-    L_LL  = log-cosh on LL_post (합-방식 dll_sum 사용)
-    L_cons= MSE(dll_aux, dll_sum.detach())  # 합-보조 일관성 soft 제약
-    L_tv  = 인접 레벨 ΔSL 스무딩(옵션; tv_w가 0이면 꺼짐)
-    total = wSL*L_SL + wLL*L_LL + wC*L_cons + tv_w*L_tv
-- 체크포인트/조기종료: **검증 total loss 기준**
-- CSV: rmse_dll, rmse_dsl_all, per-level rmse, best_epoch, lambdas 기록
-"""
 
 import json, argparse, random, csv, time, os
 from pathlib import Path
@@ -27,31 +15,22 @@ LEVELS = 5
 # 유틸
 # -------------------
 def set_seed(seed: int = 42):
-    """랜덤 시드 고정 (완전한 재현성)"""
     if seed is None: return
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    
-    # CUDA 완전 재현성 보장
+
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     
-    # PyTorch의 완전 결정론적 알고리즘 사용(옵션).
-    # 이 기능을 활성화하려면 프로세스 시작 전에 환경변수
-    # CUBLAS_WORKSPACE_CONFIG=':4096:8' 를 설정해야 합니다.
-    # (설정하지 않으면 torch.use_deterministic_algorithms(True)에서
-    #  RuntimeError 발생할 수 있음)
     if os.environ.get('CUBLAS_WORKSPACE_CONFIG'):
         try:
             torch.use_deterministic_algorithms(True)
         except Exception as e:
-            # 오류가 나더라도 진행(환경/버전 문제일 수 있음)
             print(f"Warning: unable to enable torch.use_deterministic_algorithms: {e}")
     else:
-        # 사용자에게 안내(환경변수를 설정하면 CUDA 레이어까지 결정론적)
         pass
 
 def split_indices(n, seed=None, ratios=(0.7, 0.15, 0.15)):
