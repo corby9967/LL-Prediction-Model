@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-model_mae.py - SL_post 및 LL_post 예측 (Delta SL(5) 예측 기반 합-방식), DLL 보조헤드 (MAE / L1Loss 버전)
-- 지표: MAE_LL_post, MAE_SL_post (전체 및 레벨별, 평균)로 명확히 수정됨.
-- 입력: (5레벨x12) + 글로벌4 = 64차원 [기본]. --replicate_globals 로 80차원 전환 가능
-- 손실:
-    L_SL    = L1Loss on SL_post  (레벨별 lambda 가중 적용)
-    L_LL    = L1Loss on LL_post (합-방식 dll_sum 사용)
-    L_cons= L1Loss(dll_aux, dll_sum.detach())  # 합-보조 일관성 soft 제약
-    L_tv    = 인접 레벨 Delta SL 스무딩(옵션; tv_w가 0이면 꺼짐)
-    total = wSL*L_SL + wLL*L_LL + wC*L_cons + tv_w*L_tv
-- 체크포인트/조기종료: **검증 total loss 기준**
-- CSV: **mae_ll_post**, **mae_sl_post_all**, **mae_sl_post_all_avg**, per-level mae, best_epoch, lambdas 기록
-"""
 
 import json, argparse, random, csv, time, os
 from pathlib import Path
@@ -29,15 +16,14 @@ LEVELS = 5
 # 유틸
 # -------------------
 def set_seed(seed: int = 42):
-    """랜덤 시드 고정 (완전한 재현성)"""
+    """랜덤 시드 고정"""
     if seed is None: return
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    
-    # CUDA 완전 재현성 보장
+
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     
@@ -56,7 +42,7 @@ def split_indices(n, seed=None, ratios=(0.7, 0.15, 0.15)):
     tr = ids[:n_tr]; va = ids[n_tr:n_tr+n_va]; te = ids[n_tr+n_va:]
     return tr, va, te
 
-# 💡 RMSE 대신 MAE 함수 정의
+# RMSE 대신 MAE 함수 정의
 def mae(a: torch.Tensor, b: torch.Tensor) -> float:
     # a, b 모두 0차원 이상의 텐서여야 합니다.
     if a.numel() == 0: return 0.0
@@ -64,7 +50,6 @@ def mae(a: torch.Tensor, b: torch.Tensor) -> float:
 
 # -------------------
 # 데이터셋 (64/80 차원)
-# (이 부분은 동일하므로 생략 가능하나, 완전성을 위해 포함)
 # -------------------
 class SpineDataset(Dataset):
     def __init__(self, raw_path: str, gt_path: str, replicate_globals: bool = False, zscore: bool = True):
@@ -199,7 +184,6 @@ class SharedMLP(nn.Module):
 # -------------------
 # 손실 함수들 (Log-Cosh 대신 L1Loss 사용)
 # -------------------
-# 💡 log_cosh_loss 제거. nn.L1Loss를 사용합니다.
 
 # -------------------
 # 메인 루프
@@ -227,7 +211,7 @@ def main():
     ap.add_argument('--wLL', type=float, default=0.30)
     ap.add_argument('--wC',  type=float, default=0.05)
     ap.add_argument('--tv_w', type=float, default=0.00)
-    # 💡 L1Loss (MAE)를 사용하므로 beta_sl은 무시되거나 제거될 수 있습니다. 여기서는 제거합니다.
+    # L1Loss (MAE)를 사용하므로 beta_sl은 무시되거나 제거될 수 있습니다.
     # ap.add_argument('--beta_sl', type=float, default=0.5)
 
     # 고정 lambda (합=1 필요 없음, 각 lambda ∈ [0,1])
@@ -277,7 +261,7 @@ def main():
                       h3=args.hidden3, h4=args.hidden4, dropout=args.dropout).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.alpha)
     
-    # 💡 L1Loss (MAE)로 변경
+    # L1Loss (MAE)로 변경
     l1_sl = nn.L1Loss(reduction='none')  # (B,5) 반환
     l1_ll = nn.L1Loss(reduction='mean')  # 스칼라 반환 (LL_post용)
     l1_cons = nn.L1Loss(reduction='mean') # 스칼라 반환 (일관성 제약용)
@@ -307,15 +291,15 @@ def main():
             ll_post_sum  = dll_sum  + y_ll_pre
 
             # -------- L_SL (고정 lambda 가중; SL_post 기준) --------
-            # 💡 Huber 대신 L1Loss 사용
+            # Huber 대신 L1Loss 사용
             per_el = l1_sl(sl_post_pred, y_sl_post)  # (B,5)
             per_level = torch.mean(per_el, dim=0)        # (5,)
             L_SL = torch.sum(lambdas * per_level)        # lambda 가중 합
 
             # -------- L_LL / L_cons / L_tv --------
-            # 💡 Log-Cosh 대신 L1Loss 사용
+            # Log-Cosh 대신 L1Loss 사용
             L_LL   = l1_ll(ll_post_sum, y_ll_post)       # 본판: LL_post 합 방식 평가 (L1Loss)
-            # 💡 MSE 대신 L1Loss 사용
+            # MSE 대신 L1Loss 사용
             L_cons = l1_cons(dll_aux, dll_sum.detach())  # soft consistency (L1Loss)
             L_tv   = torch.mean((dsl_pred[:,1:] - dsl_pred[:,:-1])**2) if args.tv_w>0 else dsl_pred.new_tensor(0.0)
 
@@ -349,7 +333,7 @@ def main():
 
         avg_loss = total / max(n,1)
         
-        # 💡 지표 이름 변경: mae_ll_post, mae_sl_post_all, per_level_mae, mae_sl_post_all_avg
+        # 지표 이름 변경: mae_ll_post, mae_sl_post_all, per_level_mae, mae_sl_post_all_avg
         mae_ll_post_val = mae(pred_ll_post_all, gt_ll_post_all)
         # 1. 전체 SL_post 요소에 대한 MAE (평탄화 방식)
         mae_sl_post_all_val = mae(pred_sl_post_all, gt_sl_post_all)
